@@ -1,0 +1,21 @@
+# 依赖与构建产物
+.venv/
+node_modules/
+dist/
+target/
+__pycache__/
+*.pyc
+
+# 工具链本地缓存（沙箱工作区内）
+.uv-cache/
+.uv-python/
+.cargo-home/
+.pnpm-store/
+
+# 本地数据与密钥
+.data/
+*.db
+.env
+
+# 系统
+.DS_Store
