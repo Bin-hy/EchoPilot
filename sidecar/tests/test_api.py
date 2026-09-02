@@ -94,6 +94,16 @@ def test_settings_keys(client):
     assert keys.get_key("default") == "sk-test"
 
 
+def test_live_mode_requires_asr_key(client):
+    """实时模式无 ASR Key → 400 且报错明确（不静默失败，F3/N8）。"""
+    c, _ = client
+    pid = c.post("/profiles", json={
+        "name": "p", "resume_text": RESUME, "jd_text": "j"}).json()["profile_id"]
+    r = c.post("/sessions", json={"profile_id": pid})
+    assert r.status_code == 400
+    assert "ASR" in r.json()["detail"]
+
+
 def test_full_replay_session_ws_flow(client):
     c, db = client
     pid = c.post("/profiles", json={

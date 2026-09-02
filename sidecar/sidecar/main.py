@@ -35,6 +35,9 @@ class Settings:
     llm_cheap_model: str = "deepseek-chat"
     llm_flagship_model: str = "deepseek-chat"
     llm_provider: str = "default"      # keyring 里的 provider 名
+    asr_ws_url: str = "wss://api.openai.com/v1/realtime?intent=transcription"
+    asr_model: str = "gpt-4o-transcribe"
+    asr_provider: str = "default"      # ASR 用的 keyring provider 名
     silence_threshold_ms: int = 800
     default_style: str = "standard"
 
@@ -160,6 +163,7 @@ def create_app(
     db = db or DB()
     settings = settings or Settings()
     sessions: dict[str, SessionRuntime] = {}
+    lives: dict[str, object] = {}  # session_id → LivePipeline（实时模式）
     clients: set[WebSocket] = set()
 
     async def broadcast(msg: dict) -> None:
@@ -238,34 +242,57 @@ def create_app(
 
         if providers_factory:
             providers = providers_factory(body)
+            silence_fn = None
+            live = None
         elif body.replay_path:
             providers = replay_providers_factory(
                 body.replay_path, body.replay_speed)
+            silence_fn = None
+            live = None
         else:
-            raise HTTPException(
-                400, "实时采集模式尚未启用（T7/T9 待权限与 ASR 供应商），"
-                     "请使用 replay_path 回放模式")
+            # 实时采集模式（F1–F3）：采集 → VAD → 云端 ASR
+            from sidecar.asr.providers import CloudASRConfig
+            from sidecar.live import LivePipeline
+            asr_key = keys.get_key(settings.asr_provider)
+            if not asr_key:
+                raise HTTPException(
+                    400, f"未配置 ASR API Key（provider={settings.asr_provider}）")
+            live = LivePipeline(CloudASRConfig(
+                ws_url=settings.asr_ws_url, api_key=asr_key,
+                model=settings.asr_model))
+            check = live.check_channels()
+            if not (check["system"] and check["mic"]):
+                raise HTTPException(400, f"通道自检失败: {check['error']}")
+            await live.start()
+            providers = live.providers
 
         session = db.create_session(body.profile_id)
         last_final_t = [time.monotonic()]
 
-        def silence_ms_fn() -> int:
-            return int((time.monotonic() - last_final_t[0]) * 1000)
+        if silence_fn is None:
+            if live is not None:
+                silence_fn = live.silence_ms_fn
+            else:
+                def silence_fn() -> int:
+                    return int((time.monotonic() - last_final_t[0]) * 1000)
 
         runtime = SessionRuntime(
-            session["session_id"], providers, silence_ms_fn,
+            session["session_id"], providers, silence_fn,
             deps, db, broadcast, style=settings.default_style,
             silence_threshold_ms=settings.silence_threshold_ms)
-        # 更新静音计时：面试官 final 到达时重置
-        orig_feed = runtime.detector.feed
+        # 更新静音计时：面试官 final 到达时重置（回放模式用）
+        if live is None:
+            orig_feed = runtime.detector.feed
 
-        def feed_and_reset(seg):
-            if seg.channel == "interviewer" and seg.is_final:
-                last_final_t[0] = time.monotonic()
-            orig_feed(seg)
+            def feed_and_reset(seg):
+                if seg.channel == "interviewer" and seg.is_final:
+                    last_final_t[0] = time.monotonic()
+                orig_feed(seg)
 
-        runtime.detector.feed = feed_and_reset
+            runtime.detector.feed = feed_and_reset
         sessions[session["session_id"]] = runtime
+        if live is not None:
+            lives[session["session_id"]] = live
         await runtime.start()
         return session
 
@@ -274,6 +301,9 @@ def create_app(
         runtime = sessions.pop(sid, None)
         if runtime:
             await runtime.stop()
+        live = lives.pop(sid, None)
+        if live:
+            await live.stop()
         db.end_session(sid)
         return {"ok": True}
 

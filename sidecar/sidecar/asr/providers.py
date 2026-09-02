@@ -15,7 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 
 @dataclass
@@ -73,34 +73,123 @@ class ReplayASRProvider(ASRProvider):
                              item.start_ms, item.end_ms, True)
 
 
-class CloudStreamASRProvider(ASRProvider):
-    """云端流式 ASR 适配器（OpenAI 兼容 realtime 风格 WS 协议）。
+@dataclass
+class CloudASRConfig:
+    ws_url: str                      # 如 wss://api.openai.com/v1/realtime?intent=transcription
+    api_key: str
+    model: str = "gpt-4o-transcribe"
+    extra_headers: dict = field(default_factory=dict)
 
-    子类或配置可覆盖 build_url / 消息格式以适配不同供应商。
-    断线抛出 ASRError(kind="network") 供 status.health 上报（N8）。
+
+class CloudStreamASRProvider(ASRProvider):
+    """云端流式 ASR 适配器（OpenAI Realtime transcription 协议，N10）。
+
+    供应商差异收敛在三个协议钩子上：
+    session_init_msg() / append_msg() / parse_event() ——
+    换 Deepgram/阿里云时子类覆盖这三个方法即可。
     """
 
-    def __init__(self, base_ws_url: str, api_key: str, model: str,
-                 sample_rate: int = 16000):
-        self.base_ws_url = base_ws_url
-        self.api_key = api_key
-        self.model = model
-        self.sample_rate = sample_rate
+    def __init__(self, config: CloudASRConfig,
+                 on_error: Callable[["ASRError"], None] | None = None):
+        self.config = config
+        self.on_error = on_error
         self._queues: dict[str, asyncio.Queue] = {}
+        self._senders: dict[str, Callable[[bytes], None]] = {}
+        self._tasks: list[asyncio.Task] = []
+        self._t0: dict[str, float] = {}
         self._seq = 0
 
+    # ── 协议钩子 ──────────────────────────────────────────────
+    def session_init_msg(self) -> dict | None:
+        return {
+            "type": "transcription_session.update",
+            "session": {
+                "input_audio_format": "pcm16",
+                "input_audio_transcription": {"model": self.config.model},
+                "turn_detection": {"type": "server_vad", "threshold": 0.5,
+                                   "silence_duration_ms": 500},
+            },
+        }
+
+    def append_msg(self, pcm: bytes) -> dict:
+        return {"type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm).decode()}
+
+    def parse_event(self, data: dict, channel: str) -> ASRSegment | None:
+        etype = data.get("type", "")
+        if etype == "conversation.item.input_audio_transcription.delta":
+            return self._make(channel, data.get("delta", ""), False)
+        if etype == "conversation.item.input_audio_transcription.completed":
+            return self._make(channel, data.get("transcript", ""), True)
+        if etype == "error":
+            raise ASRError("unknown", json.dumps(data)[:200])
+        return None
+
+    # ── 生命周期 ──────────────────────────────────────────────
+    def _make(self, channel: str, text: str, is_final: bool) -> ASRSegment:
+        self._seq += 1
+        now_ms = int((time.monotonic() - self._t0.get(channel, time.monotonic()))
+                     * 1000)
+        return ASRSegment(f"cloud-{channel}-{self._seq}", channel, text,
+                          max(0, now_ms - 1000), now_ms, is_final)
+
+    async def start_channel(self, channel: str) -> None:
+        import websockets
+        self._queues[channel] = asyncio.Queue()
+        self._t0[channel] = time.monotonic()
+        headers = {"Authorization": f"Bearer {self.config.api_key}",
+                   "OpenAI-Beta": "realtime=v1",
+                   **self.config.extra_headers}
+        try:
+            ws = await websockets.connect(
+                self.config.ws_url, additional_headers=headers)
+        except Exception as e:
+            raise ASRError("network", f"WS 连接失败: {e}") from e
+
+        init = self.session_init_msg()
+        if init:
+            await ws.send(json.dumps(init))
+
+        self._senders[channel] = lambda pcm: asyncio.create_task(
+            ws.send(json.dumps(self.append_msg(pcm))))
+        self._tasks.append(asyncio.create_task(
+            self._reader(ws, channel)))
+
+    async def _reader(self, ws, channel: str) -> None:
+        q = self._queues[channel]
+        try:
+            async for raw in ws:
+                try:
+                    seg = self.parse_event(json.loads(raw), channel)
+                except ASRError as e:
+                    if self.on_error:
+                        self.on_error(e)
+                    continue
+                if seg and seg.text:
+                    await q.put(seg)
+        except Exception as e:
+            if self.on_error:
+                self.on_error(ASRError("network", str(e)))
+        finally:
+            await q.put(None)
+
     async def feed_pcm(self, channel: str, pcm_bytes: bytes) -> None:
-        """由采集层回调喂入 20ms PCM 帧。"""
-        # V0.1：真实实现按供应商协议封帧发送；此处保留接口形状。
-        raise NotImplementedError("待 T7 按选定供应商协议实现")
+        sender = self._senders.get(channel)
+        if sender:
+            sender(pcm_bytes)
 
     async def open_stream(self, channel: str) -> AsyncIterator[ASRSegment]:
-        q: asyncio.Queue = self._queues.setdefault(channel, asyncio.Queue())
+        q = self._queues.setdefault(channel, asyncio.Queue())
         while True:
             seg = await q.get()
             if seg is None:  # 流结束信号
                 return
             yield seg
+
+    async def close(self) -> None:
+        for t in self._tasks:
+            t.cancel()
+        self._tasks = []
 
 
 class ASRError(Exception):
