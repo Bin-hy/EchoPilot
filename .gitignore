@@ -11,6 +11,15 @@ __pycache__/
 .uv-python/
 .cargo-home/
 .pnpm-store/
+.pyinstaller/
+
+# PyInstaller 产物
+sidecar/dist/
+sidecar/build/
+*.spec
+
+# 打包中间产物
+src-tauri/binaries/
 
 # 本地数据与密钥
 .data/

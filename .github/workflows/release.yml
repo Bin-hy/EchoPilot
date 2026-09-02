@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    name: macOS (Apple Silicon) DMG
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 1. PyInstaller 打包 sidecar 为单文件二进制
+      - name: Build sidecar binary
+        working-directory: sidecar
+        run: |
+          uv sync
+          uv run pyinstaller --onefile --name echopilot-sidecar \
+            --collect-all sqlite_vec --collect-all silero_vad \
+            --hidden-import keyring.backends.macOS run.py
+
+      # 2. 放到 tauri externalBin 约定的位置（目标三元组后缀）
+      - name: Stage sidecar binary
+        run: |
+          mkdir -p src-tauri/binaries
+          cp sidecar/dist/echopilot-sidecar \
+            src-tauri/binaries/echopilot-sidecar-aarch64-apple-darwin
+          chmod +x src-tauri/binaries/echopilot-sidecar-aarch64-apple-darwin
+
+      # 3. 前端构建 + Tauri 打包 + 发布 Release
+      - name: Install frontend deps
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir apps/web install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "EchoPilot ${{ github.ref_name }}"
+          releaseBody: "macOS 13+（Apple Silicon）。未签名：右键打开或 `xattr -dr com.apple.quarantine /Applications/EchoPilot.app`。首次使用需在系统设置授予屏幕录制与麦克风权限。"
+          releaseDraft: false
+          prerelease: true

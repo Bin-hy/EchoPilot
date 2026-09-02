@@ -22,6 +22,22 @@ pub fn sidecar_url(path: &str) -> String {
 }
 
 fn spawn_child(sidecar_dir: &PathBuf) -> std::io::Result<Child> {
+    // 打包模式：优先运行 App 内置的 sidecar 单文件二进制
+    // （PyInstaller 产物，经 tauri externalBin 放在可执行文件旁）
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("echopilot-sidecar");
+            if bundled.exists() {
+                return Command::new(bundled)
+                    .arg("--port")
+                    .arg(SIDECAR_PORT.to_string())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+    // 开发模式：uv run（需 sidecar 源码目录）
     Command::new("uv")
         .args([
             "run", "uvicorn", "sidecar.main:create_app",

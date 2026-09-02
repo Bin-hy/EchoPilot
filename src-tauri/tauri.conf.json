@@ -2,12 +2,12 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "EchoPilot",
   "version": "0.1.0",
-  "identifier": "com.echopilot.app",
+  "identifier": "com.echopilot.desktop",
   "build": {
     "frontendDist": "../apps/web/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "pnpm --dir ../apps/web dev",
-    "beforeBuildCommand": "pnpm --dir ../apps/web build"
+    "beforeDevCommand": "pnpm --dir apps/web dev",
+    "beforeBuildCommand": "pnpm --dir apps/web build"
   },
   "app": {
     "windows": [
@@ -33,5 +33,10 @@
     ],
     "security": { "csp": null }
   },
-  "bundle": { "active": false }
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png"],
+    "externalBin": ["binaries/echopilot-sidecar"]
+  }
 }
