@@ -79,6 +79,8 @@ async def run_turn(
             final = chunk
     latency = dict(final.get("latency_ms", {}))
     latency["total"] = int((time.monotonic() - t0) * 1000)
+    # persist 节点在图内执行时 total 尚未产生，图结束后回填（AC8 统计）
+    deps.db.update_turn_latency(turn_id, latency)
     yield {
         "type": "done",
         "turn_id": turn_id,

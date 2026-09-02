@@ -150,6 +150,7 @@ async def persist(state: TurnState, deps: AgentDeps) -> dict:
     latency = dict(state.get("latency_ms", {}))
     deps.db.insert_turn(
         state["session_id"], state["detected_question"],
+        turn_id=state.get("turn_id"),
         question_type=state.get("question_type"),
         answer_skeleton=state.get("answer_skeleton", []),
         answer_full=state.get("answer_full", ""),

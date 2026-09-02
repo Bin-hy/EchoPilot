@@ -194,8 +194,9 @@ class DB:
         self.conn.commit()
 
     # ── turns ─────────────────────────────────────────────────
-    def insert_turn(self, session_id: str, question_text: str, **fields) -> str:
-        tid = _new_id()
+    def insert_turn(self, session_id: str, question_text: str,
+                    turn_id: str | None = None, **fields) -> str:
+        tid = turn_id or _new_id()
         self.conn.execute(
             "INSERT INTO turns VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -211,6 +212,13 @@ class DB:
         )
         self.conn.commit()
         return tid
+
+    def update_turn_latency(self, turn_id: str, latency_ms: dict) -> None:
+        self.conn.execute(
+            "UPDATE turns SET latency_ms=? WHERE turn_id=?",
+            (json.dumps(latency_ms, ensure_ascii=False), turn_id),
+        )
+        self.conn.commit()
 
     def list_turns(self, session_id: str) -> list[dict]:
         rows = self.conn.execute(

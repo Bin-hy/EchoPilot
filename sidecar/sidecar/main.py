@@ -67,8 +67,43 @@ class KeyIn(BaseModel):
 
 
 # ── 默认工厂（真实供应商，N10）────────────────────────────────
+FAKE_ANSWER = ("- 主导 Kafka 改造\n- 延迟降低 37%\n- 灰度上线无事故\n\n"
+               "我在星图科技主导了 Kafka 消息平台改造，"
+               "端到端延迟降低 37%，支撑 200万 QPS。")
+
+
+def fake_deps_factory(db: DB, settings: Settings,
+                      profile_id: str) -> AgentDeps:
+    """开发/联调模式（ECHOPILOT_FAKE_LLM=1）：不依赖真实 Key，
+    验证 app→sidecar→浮窗→落库 全链路（T22）。"""
+    profile = db.get_profile(profile_id) or {}
+
+    async def cheap_chat(messages):
+        return json.dumps({"question_type": "project",
+                           "topic_tags": ["Kafka"]}, ensure_ascii=False)
+
+    async def flagship_stream(messages):
+        for piece in [FAKE_ANSWER[i:i + 12]
+                      for i in range(0, len(FAKE_ANSWER), 12)]:
+            yield piece
+            await asyncio.sleep(0.02)  # 模拟流式节奏
+
+    return AgentDeps(
+        cheap_chat=cheap_chat,
+        flagship_stream=flagship_stream,
+        store=ProfileStore(db),
+        db=db,
+        profile_id=profile_id,
+        jd_digest=(profile or {}).get("jd_digest") or "",
+        resume_text=(profile or {}).get("resume_text") or "",
+    )
+
+
 def default_deps_factory(db: DB, settings: Settings,
                          profile_id: str) -> AgentDeps:
+    import os
+    if os.environ.get("ECHOPILOT_FAKE_LLM") == "1":
+        return fake_deps_factory(db, settings, profile_id)
     api_key = keys.get_key(settings.llm_provider)
     if not api_key:
         raise HTTPException(400, f"未配置 LLM API Key（provider={settings.llm_provider}）")
